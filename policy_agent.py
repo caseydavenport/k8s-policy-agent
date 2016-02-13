@@ -20,7 +20,7 @@ _log = logging.getLogger(__name__)
 pycalico_logger = logging.getLogger(pycalico.__name__)
 
 # Logging constants.
-LOG_LEVEL=logging.INFO
+LOG_LEVEL=logging.DEBUG
 LOG_FORMAT = '%(asctime)s %(process)d %(levelname)s %(message)s'
 
 # API path to get NetworkPolicy objects.
@@ -36,8 +36,10 @@ NAMESPACE_WATCH_PATH = "%s/api/v1/watch/namespaces"
 # Annotation to look for network-isolation on namespaces.
 NS_POLICY_ANNOTATION = "net.alpha.kubernetes.io/network-isolation"
 
-# Group to use for created policies.
-GROUP_NAME = "50-kubernetes"
+# Groups to use for created policies.  Network policies are applied before 
+# namespace policies based on the group.
+NET_POL_GROUP_NAME = "50-k8s-net-policy"
+NAMESPACE_GROUP_NAME = "60-k8s-namespace"
 
 K8S_NAMESPACE_LABEL = "calico/k8s_namespace"
 
@@ -233,8 +235,8 @@ class PolicyAgent():
         # the labels provided in the NetworkPolicy, as well as the 
         # NetworkPolicy's namespace.
         namespace = policy["object"]["metadata"]["namespace"]
-        selectors = ["%s == %s" % (k,v) for k,v in k8s_selector.iteritems()]
-        selectors += ["%s == %s" % (K8S_NAMESPACE_LABEL, namespace)]
+        selectors = ["%s == '%s'" % (k,v) for k,v in k8s_selector.iteritems()]
+        selectors += ["%s == '%s'" % (K8S_NAMESPACE_LABEL, namespace)]
         selector = " && ".join(selectors)
 
         # Determine the name for this global policy.
@@ -256,7 +258,7 @@ class PolicyAgent():
                            outbound_rules=[Rule(action="allow")])
 
         # Create the network policy using the calculated selector and rules.
-        self._client.create_global_policy(GROUP_NAME, name, selector, rules)
+        self._client.create_global_policy(NET_POL_GROUP_NAME, name, selector, rules)
         _log.info("Updated global policy '%s' for NetworkPolicy %s", name, key)
 
     def _delete_network_policy(self, key, policy):
@@ -273,20 +275,24 @@ class PolicyAgent():
         name = "net_policy-%s" % policy["object"]["metadata"]["name"]
 
         # Delete the corresponding Calico policy 
-        self._client.remove_global_policy(GROUP_NAME, name)
+        self._client.remove_global_policy(NET_POL_GROUP_NAME, name)
 
     def _calculate_inbound_rules(self, policy):
         """
         Takes a NetworkPolicy object from the API and returns a list of 
         Calico Rules objects which should be applied on ingress.
         """
+        # Store the rules to return.
         rules = []
+
+        # Iterate through each allowIncoming object and create the appropriate
+        # rules.
         allow_incomings = policy["object"]["spec"]["allowIncoming"]
         for r in allow_incomings:
             # Determine the destination ports to allow.  If no ports are
             # specified, allow all port / protocol combinations.
             ports_by_protocol = {}
-            for to_port in r["toPorts"]:
+            for to_port in r.get("toPorts", []):
                 # Keep a dict of ports exposed, keyed by protocol.
                 protocol = to_port.get("protocol")
                 port = to_port.get("port")
@@ -295,34 +301,48 @@ class PolicyAgent():
                     _log.debug("Allow to port: %s/%s", protocol, port)
                     ports.append(port)
 
-            # Determine the from criteria.
-            from_pods = []
-            from_ns = []
-            for from_clause in r["from"]:
-                pods = from_clause.get("pods", {})
+            # Convert into arguments to be passed to a Rule object.
+            to_args = []
+            for protocol, ports in ports_by_protocol.iteritems():
+                arg = {"protocol": protocol.lower()}
+                if ports:
+                    arg["dst_ports"] = ports
+                to_args.append(arg)
+
+            if not to_args:
+                # There are not destination protocols / ports specified.
+                # Allow to all protocols and ports.
+                to_args = [{}]
+
+            # Determine the from criteria.  If no "from" block is specified,
+            # then we should allow from all sources.
+            from_args = []
+            for from_clause in r.get("from", []):
+                pod_selector = from_clause.get("pods", {})
                 namespaces = from_clause.get("namespaces", {})
-                if pods:
-                    _log.debug("Allow from pods: %s", pods)
-                    selectors = ["%s == %s" % (k,v) for k,v in pods.iteritems()]
+                if pod_selector:
+                    # There is a pod selector in this "from" clause.
+                    _log.debug("Allow from pods: %s", pod_selector)
+                    selectors = ["%s == '%s'" % (k,v) for k,v in pod_selector.iteritems()]
                     selector = " && ".join(selectors)
-                    from_pods.append(selector)
+                    from_args.append({"src_selector": selector})
                 elif namespaces:
                     _log.warning("'from: {namespaces: {}}' is not yet "
                                  "supported - ignoring %s", from_clause)
 
+            if not from_args:
+                # There are no match criteria specified.  We should allow
+                # from all sources to the given ports.
+                from_args = [{}]
+
             # A rule per-protocol, per-from-clause.
-            for proto, ports in ports_by_protocol.iteritems():
-                # Calculate port/protocol rule args.
-                port_args = {"action": "allow", "protocol": proto.lower()}
-                if ports:
-                    port_args["dst_ports"] = ports
-
-                for selector in from_pods:
-                    args = {"src_selector": selector}
-                    args.update(port_args)
-
-                    # Append the rule.
-                    rules.append(Rule(**args))
+            for to_arg in to_args: 
+                for from_arg in from_args:
+                    # Create a rule by combining a 'from' argument with
+                    # the protocol / ports arguments.
+                    from_arg.update(to_arg)
+                    from_arg.update({"action": "allow"})
+                    rules.append(Rule(**from_arg))
 
         _log.debug("Calculated rules: %s", rules)
         return rules
@@ -344,23 +364,25 @@ class PolicyAgent():
         net_isolation = annotations.get(NS_POLICY_ANNOTATION, "no") == "yes"
         _log.info("Namespace %s has: network-isolation=%s", key, net_isolation)
 
+        # Determine the policy name to create.
+        namespace_name = namespace["object"]["metadata"]["name"]
+        policy_name = "k8s_ns-%s" % namespace_name
+
         # Determine the rules to use.
         outbound_rules = [Rule(action="allow")]
         if net_isolation:
             inbound_rules = [Rule(action="deny")]
         else:
             inbound_rules = [Rule(action="allow")]
-        rules = Rules(id=key[0],
+        rules = Rules(id=policy_name,
                       inbound_rules=inbound_rules,
                       outbound_rules=outbound_rules)
 
         # Create the Calico policy to represent this namespace, or 
         # update it if it already exists.  Namespace policies select each
         # pod within that namespace.
-        namespace_name = namespace["object"]["metadata"]["name"]
-        policy_name = "k8s_ns-%s" % namespace_name
-        selector = "%s == %s" % (K8S_NAMESPACE_LABEL, namespace_name) 
-        self._client.create_global_policy(GROUP_NAME, policy_name, 
+        selector = "%s == '%s'" % (K8S_NAMESPACE_LABEL, namespace_name) 
+        self._client.create_global_policy(NAMESPACE_GROUP_NAME, policy_name, 
                                           selector, rules=rules)
         _log.info("Created/updated global policy for namespace %s", 
                   namespace_name)
@@ -377,7 +399,7 @@ class PolicyAgent():
         # in this namespace first.
         namespace_name = namespace["object"]["metadata"]["name"]
         policy_name = "k8s_ns-%s" % namespace_name
-        self._client.remove_global_policy(GROUP_NAME, policy_name)
+        self._client.remove_global_policy(NAMESPACE_GROUP_NAME, policy_name)
 
         # Delete from internal dict.
         del self._namespaces[key]
@@ -422,7 +444,7 @@ class PolicyAgent():
         _log.debug("Pod '%s' has labels: %s", key, labels)
 
         # Add a special label for the Kubernetes namespace.
-        labels [K8S_NAMESPACE_LABEL] = pod["object"]["metadata"]["namespace"]
+        labels[K8S_NAMESPACE_LABEL] = pod["object"]["metadata"]["namespace"]
 
         # Set the labels on the endpoint.
         endpoint.labels = labels
