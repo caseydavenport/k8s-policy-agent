@@ -24,6 +24,8 @@ spec:
           env:
           - name: ETCD_AUTHORITY
             value: "<KUBERNETES_MASTER>:2379"
+          - name: K8S_API
+            value: "https://10.100.0.1"
           - name: K8S_AUTH_TOKEN
             value: "<TOKEN>"
           resources:
