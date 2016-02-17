@@ -4,23 +4,19 @@ metadata:
   name: calico-policy-agent
   namespace: calico-system
   labels:
-    version: v1
+    version: v0.1.0
     projectcalico.org/app: "policy-agent"
 spec:
   replicas: 1
   selector:
-    version: v1
+    version: v0.1.0
     projectcalico.org/app: "policy-agent"
   template:
     metadata:
       labels:
-        version: v1
+        version: v0.1.0
         projectcalico.org/app: "policy-agent"
     spec:
-      volumes:
-      - hostPath:
-          path: /var/log/calico/kubernetes/policy-agent/
-        name: logdir
       containers:
         - image: calico/k8s-policy-agent
         env:
