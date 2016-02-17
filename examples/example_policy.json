@@ -6,10 +6,10 @@
     "name": "test-policy"
   },
   "spec": {
-    "applyTo": {
+    "podSelector": {
       "tier": "backend"
     }, 
-    "allowIncoming": [
+    "ingress": [
       {
         "from": [
           {
@@ -23,7 +23,7 @@
             }
           }
         ], 
-        "toPorts": [
+        "ports": [
           {
             "protocol": "TCP", 
             "port": 80

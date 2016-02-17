@@ -3,10 +3,10 @@ apiVersion: net.alpha.kubernetes.io/v1alpha1
 metadata:
   name: test-policy
   namespace: default
-applyTo:
+podSelector:
   tier: backend
-allowIncoming:
-  - toPorts:
+ingress:
+  - ports:
     - port: 80
       protocol: TCP
     from: 
