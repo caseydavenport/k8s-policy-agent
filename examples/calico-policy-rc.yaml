@@ -20,7 +20,7 @@ spec:
       containers:
         - name: policyagent
           image: calico/k8s-policy-agent
-          imagePullPolicy: always
+          imagePullPolicy: Always
           env:
           - name: ETCD_AUTHORITY
             value: "<KUBERNETES_MASTER>:2379"
