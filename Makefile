@@ -20,8 +20,8 @@ policy:
 	pyinstaller policy.py -ayF 
 
 docker-image: binary
-	docker build -t calico/k8s-policy-agent . 
-	docker save -o k8s-network-policy.tar calico/k8s-policy-agent
+	docker build -t caseydavenport/k8s-policy-agent . 
+	docker save -o k8s-network-policy.tar caseydavenport/k8s-policy-agent
 
 clean:
 	find . -name '*.pyc' -exec rm -f {} +
